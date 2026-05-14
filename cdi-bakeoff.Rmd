@@ -1,0 +1,56 @@
+---
+title: "Comparing CDIs for Assessing Bilingual Children"
+author: "George"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+require(tidyverse)
+require(kableExtra)
+require(mirt)
+require(mirtCAT)
+require(ggpubr)
+```
+
+When deciding how to assess bilingual children, researcher now have several options, including:
+ - full CDI in each language
+ - Swadesh-CDI in each language
+ - CDI-CATs (for available languages)
+ - published short forms (for available languages)
+ - DLL-ES (only for English and Spanish)
+
+The question is: what is the best option (or combination), if the goal is to assess children's ability in each language?
+We'll start just by looking at a correlation matrix comparing each measure's estimated ability. 
+
+```{r load-data}
+# BiLexPo data -- has 'bilingual' identifier in dataset_origin_name
+bi_dat <- readRDS("data/bilingual_item_data_clean.Rds") |>
+  filter(dataset_origin_name %in% 
+           c("Marchman Dallas Bilingual", "Hoff_English_Mexican_Bilingual"))
+
+load("data/new_EN_WS_WG_norms.Rdata") # d_demo, d_mat, d_wide
+load("data/wordbank_sp_ws_wg_webcdi12-30mos.Rds") # d_demo, d_mat, d_wide, items
+```
+
+```{r load-irt-models}
+
+```
+
+```{r load-forms}
+swad100 <- read_csv("Swadesh/Swadesh100.csv")
+
+swad_extension_unis <- c(
+  "try", "under", "in", "out",
+  "glue (object)", "toy (object)", # chalk only on 14 forms, try on 13
+  "all", "many", "not", "a lot"
+)
+
+floccia30 <- c("elephant", "fish (animal)", "lion", "airplane", "car", "ball", "book", "milk", "nose",
+               "shoe", "sock", "bed", "chair", "door", "table", "cup", "scissors", "soap", "flower",
+               "sky", "tree", "mommy", "fall (action)", "play", "big", "cold", "dirty", "hot",
+               "what", "where (question)")
+```
+
