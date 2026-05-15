@@ -29,14 +29,66 @@ We'll start just by looking at a correlation matrix comparing each measure's est
 # BiLexPo data -- has 'bilingual' identifier in dataset_origin_name
 bi_dat <- readRDS("data/bilingual_item_data_clean.Rds") |>
   filter(dataset_origin_name %in% 
-           c("Marchman Dallas Bilingual", "Hoff_English_Mexican_Bilingual"))
+           c("Marchman Dallas Bilingual", "Hoff_English_Mexican_Bilingual")) |>
+  filter(production!=0, production!=680) # no floor or ceiling
 
-load("data/new_EN_WS_WG_norms.Rdata") # d_demo, d_mat, d_wide
-load("data/wordbank_sp_ws_wg_webcdi12-30mos.Rds") # d_demo, d_mat, d_wide, items
+d_demo <- bi_dat |> select(language, data_id, child_id, dataset_origin_name, form, age, sex, produces) |>
+  group_by(language, data_id, child_id, dataset_origin_name, form, age, sex) |>
+  summarise(production = sum(produces, na.rm=T))
+
+d_mat <- bi_dat |> pivot_wider(id_cols = data_id, names_from = uni_lemma, values_from = produces) 
+
+
+dupes <- bi_dat |>
+  dplyr::summarise(n = dplyr::n(), .by = c(data_id, uni_lemma)) |>
+  dplyr::filter(n > 1L)
+# per-language data -- but how do we identify the bilinguals?
+#load("data/new_EN_WS_WG_norms.Rdata") # d_demo, d_mat, d_wide
+#load("data/wordbank_sp_ws_wg_webcdi12-30mos.Rds") # d_demo, d_mat, d_wide, items
 ```
 
 ```{r load-irt-models}
+load("models/eng_ws_wg_mod_2pl_nobad.Rds") # mod_2pl
+en_mod <- mod_2pl
+load("models/sp_ws_wg_mod_2pl_nobad.Rds")
+sp_mod <- mod_2pl
 
+# age-based starting items
+en_start_items <- read_csv("models/EN_production_start_items_by_age.csv")
+sp_start_items <- read_csv("models/SP_production_start_items_by_age.csv")
+
+preferredCAT <- function(dat, method='ML', min_SEM=.15, start_item=c()) {
+  all_items = c() # track freq of all the items that were asked 
+  parms = c()
+  if(length(start_item)==0) start_item = 'MI' # otherwise supply age-based
+  results <- mirtCAT(mo = mod_2pl, criteria = 'MI', start_item = start_item, 
+                     method = method, local_pattern = dat, 
+                     design = list(min_items = 25,
+                                   max_items = 50, 
+                                   min_SEM = min_SEM))
+  for(s in 1:nrow(dat)) {
+    all_items = c(all_items, results[[s]]$items_answered)
+    so <- summary(results[[s]])
+    parms = rbind(parms, c(t(so$final_estimates), length(so$items_answered)))
+  }
+  sum_score = rowSums(dat)
+  parms = data.frame(cbind(parms, sum_score))
+  names(parms) = c("thetaCAT","CAT_SE","Qs_asked","sum_score")
+  want = list(all_items=all_items, parms=parms)
+  return(want)
+}
+
+start_item_subj = rep(NA, nrow(d_demo))
+for(i in 1:nrow(d_demo)) {
+  start_item_subj[i] = subset(age_startits, age==d_demo[i,]$age)$index
+}
+
+cat_result = preferredCAT(d_mat_imp, method='MAP', start_item=start_item_subj)
+
+d_demo$fullCDItheta = fscores_2pl$ability
+d_demo$CATtheta = cat_result$parms$thetaCAT
+d_demo$CAT_SE = cat_result$parms$CAT_SE
+d_demo$Qs_asked = cat_result$parms$Qs_asked
 ```
 
 ```{r load-forms}
