@@ -28,34 +28,53 @@ We'll start just by looking at a correlation matrix comparing each measure's est
 ```{r load-data}
 # BiLexPo data -- has 'bilingual' identifier in dataset_origin_name
 bi_dat <- readRDS("data/bilingual_item_data_clean.Rds") |>
+  mutate(definition = paste0("WS_",item_id)) |>
   filter(dataset_origin_name %in% 
            c("Marchman Dallas Bilingual", "Hoff_English_Mexican_Bilingual")) |>
   filter(production!=0, production!=680) # no floor or ceiling
 
+items <- bi_dat |> distinct(language, item_id, uni_lemma, english_gloss, definition, item_definition) 
+en_items <- items |> filter(language=="English (American)") 
+sp_items <- items |> filter(language=="Spanish (Mexican)")
+
 d_demo <- bi_dat |> select(language, data_id, child_id, dataset_origin_name, form, age, sex, produces) |>
   group_by(language, data_id, child_id, dataset_origin_name, form, age, sex) |>
-  summarise(production = sum(produces, na.rm=T))
+  summarise(production = sum(produces, na.rm=T)) |>
+  arrange(data_id)
 
-d_mat <- bi_dat |> pivot_wider(id_cols = data_id, names_from = uni_lemma, values_from = produces) 
+en_idx <- which(d_demo$language=="English (American)")
+sp_idx <- which(d_demo$language=="Spanish (Mexican)")
 
+# can't index by uni_lemma -- lots of duplicates
+d_mat <- bi_dat |> pivot_wider(id_cols = data_id, names_from = definition, values_from = produces) |>
+  arrange(data_id)
 
-dupes <- bi_dat |>
-  dplyr::summarise(n = dplyr::n(), .by = c(data_id, uni_lemma)) |>
-  dplyr::filter(n > 1L)
 # per-language data -- but how do we identify the bilinguals?
 #load("data/new_EN_WS_WG_norms.Rdata") # d_demo, d_mat, d_wide
 #load("data/wordbank_sp_ws_wg_webcdi12-30mos.Rds") # d_demo, d_mat, d_wide, items
 ```
 
+Using data from `r length(en_idx)` English WS administrations and `r length(sp_idx)` Spanish WS administrations.
+
 ```{r load-irt-models}
-load("models/eng_ws_wg_mod_2pl_nobad.Rds") # mod_2pl
-en_mod <- mod_2pl
-load("models/sp_ws_wg_mod_2pl_nobad.Rds")
-sp_mod <- mod_2pl
+# en$model and sp$model have the 2PL mirt models
+en <- readRDS("models/English (American)_2PL_allforms_prod_fits.rds")
+sp <- readRDS("models/Spanish (Mexican)_2PL_allforms_prod_fits.rds")
+
+#load("models/eng_ws_wg_mod_2pl_nobad.Rds") # mod_2pl
+#en_mod <- mod_2pl
+#load("models/sp_ws_wg_mod_2pl_nobad.Rds")
+#sp_mod <- mod_2pl
 
 # age-based starting items
-en_start_items <- read_csv("models/EN_production_start_items_by_age.csv")
-sp_start_items <- read_csv("models/SP_production_start_items_by_age.csv")
+en_start_items <- read_csv("models/EN_production_start_items_by_age.csv") |>
+  rename(item_definition = definition) |> 
+  left_join(items |> select(item_definition, definition, item_id))
+sp_start_items <- read_csv("models/SP_production_start_items_by_age.csv") |>
+  rename(item_definition = definition) |>
+  left_join(items |> select(item_definition, definition, item_id))
+
+# ToDo: re-define index column to match definition index in d_mat
 
 preferredCAT <- function(dat, method='ML', min_SEM=.15, start_item=c()) {
   all_items = c() # track freq of all the items that were asked 
@@ -92,7 +111,7 @@ d_demo$Qs_asked = cat_result$parms$Qs_asked
 ```
 
 ```{r load-forms}
-swad100 <- read_csv("Swadesh/Swadesh100.csv")
+swad100 <- read_csv("forms/Swadesh100.csv")
 
 swad_extension_unis <- c(
   "try", "under", "in", "out",
@@ -100,9 +119,57 @@ swad_extension_unis <- c(
   "all", "many", "not", "a lot"
 )
 
+swad110 <- tibble(uni_lemma = c(swad100$uni_lemma, swad_extension_unis))
+# need to get Spanish and English item_ids for each swad110 uni-lemma
+
 floccia30 <- c("elephant", "fish (animal)", "lion", "airplane", "car", "ball", "book", "milk", "nose",
                "shoe", "sock", "bed", "chair", "door", "table", "cup", "scissors", "soap", "flower",
                "sky", "tree", "mommy", "fall (action)", "play", "big", "cold", "dirty", "hot",
                "what", "where (question)")
+# need to get Spanih and English item_ids for each floccia30 uni-lemma
+
+# could also look at eng-ws-shortA, eng-ws-shortB, and spanish-ws-short..but let's do it later
+en_shortA <- read_csv("forms/eng-ws-shortA.csv")
+en_shortB <- read_csv("forms/eng-ws-shortB.csv")
+sp_short <- read_csv("forms/spanish-ws-short.csv")
+
+#en_dll_short <- read_csv("forms/DLL/new_DLL-ES2-short-English.csv") # 79 items
+#sp_dll_short <- read_csv("forms/DLL/new_DLL-ES2-short-Spanish.csv") # 75
+dll2long_raw <- read_csv("forms/DLL/new_DLL-ES2-long.csv")
+dll2long <- dll2long_raw %>% mutate(english = tolower(english)) %>%
+  mutate(english = case_when(english == 'daddy (or name/word used in your family)' ~ 'daddy*',
+                          english == 'teddy bear' ~ 'teddybear',
+                          english == 'patty cake' ~ 'pattycake', # or swing (action) ?
+                          english == 'dress' ~ 'dress (object)',
+                          english == 'i' ~ 'I',
+                          english == 'penis (or word used in your family)' ~ 'penis*',
+                          english == 'water' ~ 'water (beverage)',
+                          english == 'orange' ~ 'orange (food)',
+                          english == 'clock/watch' ~ 'clock', # or watch (object)
+                          english == 'drink' ~ 'drink (action)',
+                          english == 'feet' ~ 'foot',
+                          english == 'picture (\"or photo\")' ~ 'picture',
+                          english == 'buttocks/bottom (or word used in your family)' ~ 'buttocks/bottom*',
+                          TRUE ~ english))
+
+dll2long <- dll2long %>% mutate(spanish = tolower(spanish)) %>%
+  separate(col = spanish, into = c("spanish", NA), sep=" \\(") %>%
+  mutate(spanish = case_when(spanish == 'pipi' ~ 'pipí',
+                          spanish == 'shh' ~ 'shhh',
+                          spanish == 'bolsa' ~ 'bolsa (clothing)', # or bolsa (household) ?
+                          spanish == 'qué' ~ 'qué (question_words)',
+                          TRUE ~ spanish))
+
+#length(intersect(dll2long$spanish, coefs$sp$definition)) 
+#setdiff(dll2long$spanish, coefs$sp$definition)
+
+en_wg_dll_long_cols = union(en_wg_short_dll_cols, na.omit(match(dll1long$english, colnames(d_mat_en)))) # 234
+
+d_demo_en$DLL1long_sum = rowSums(d_mat_en[,en_wg_dll_long_cols], na.rm=T)
+```
+
+
+```{r}
+
 ```
 
