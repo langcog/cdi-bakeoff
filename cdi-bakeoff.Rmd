@@ -343,16 +343,39 @@ d_demo_sp$shortForm_sum <- rowSums(d_mat_sp[, short_sp_cols,   drop = FALSE], na
 d_demo_sp$swad100_sum   <- rowSums(d_mat_sp[, swad100_sp_cols, drop = FALSE], na.rm = TRUE)
 d_demo_sp$dll2_sum      <- rowSums(d_mat_sp[, dll2_sp_cols,    drop = FALSE], na.rm = TRUE)
 d_demo_sp$floccia_sum   <- rowSums(d_mat_sp[, floccia_sp_cols, drop = FALSE], na.rm = TRUE)
+
+# ── IRT scoring: MAP theta from form items only ──────────────────────────────
+# fscores() treats NAs as "not administered", so we expand each form's
+# responses to the full model item set (NAs for all non-form items) and
+# compute MAP theta — the same estimator used for the full CDI.
+score_form_irt <- function(dmat, form_cols, model, model_items, method = "MAP") {
+  form_dmat      <- dmat[, form_cols, drop = FALSE]
+  form_dmat_full <- expand_to_model(form_dmat, model_items)
+  theta          <- fscores(model, response.pattern = form_dmat_full, method = method)
+  theta[, 1]
+}
+
+d_demo_en$shortForm_theta <- score_form_irt(en_dmat, shortA_en_cols,  en$model, en_model_items)
+d_demo_en$swad100_theta   <- score_form_irt(en_dmat, swad100_en_cols, en$model, en_model_items)
+d_demo_en$dll2_theta      <- score_form_irt(en_dmat, dll2_en_cols,    en$model, en_model_items)
+d_demo_en$floccia_theta   <- score_form_irt(en_dmat, floccia_en_cols, en$model, en_model_items)
+
+d_demo_sp$shortForm_theta <- score_form_irt(sp_dmat, short_sp_cols,   sp$model, sp_model_items)
+d_demo_sp$swad100_theta   <- score_form_irt(sp_dmat, swad100_sp_cols, sp$model, sp_model_items)
+d_demo_sp$dll2_theta      <- score_form_irt(sp_dmat, dll2_sp_cols,    sp$model, sp_model_items)
+d_demo_sp$floccia_theta   <- score_form_irt(sp_dmat, floccia_sp_cols, sp$model, sp_model_items)
 ```
 
 ## Bakeoff: correlation with full-CDI θ
 
 For each measure we compute Pearson *r* with the full-CDI MAP theta estimate,
 separately for English and Spanish.
-The CDI-CAT is the IRT-based adaptive alternative; all others are sum scores.
+All short forms are scored as IRT MAP theta (using only the items on that form;
+the remaining model items are treated as not administered).
+The CDI-CAT is also IRT-scored via adaptive testing.
 
 ```{r bakeoff, fig.width = 9, fig.height = 5}
-measures       <- c("shortForm_sum", "swad100_sum", "dll2_sum", "floccia_sum", "CATtheta")
+measures       <- c("shortForm_theta", "swad100_theta", "dll2_theta", "floccia_theta", "CATtheta")
 measure_labels <- c("Published\nShort Form", "Swadesh-100",
                     "DLL-ES2", "Floccia-30", "CDI-CAT")
 
@@ -385,11 +408,11 @@ cor_table |>
   geom_text(aes(label = sprintf("%.3f", r)),
             position = position_dodge(.7), vjust = -0.4, size = 3.2) +
   scale_fill_manual(values = c("English" = "#4575b4", "Spanish" = "#d73027")) +
-  coord_cartesian(ylim = c(0.85, 1.0)) +
+  coord_cartesian(ylim = c(0.9, 1.0)) +
   labs(x = NULL,
        y = expression(italic(r) ~ "with full-CDI" ~ theta),
        fill = NULL,
-       title = "CDI bakeoff: correlation with full-CDI θ by language") +
+       title = "CDI bakeoff: IRT θ correlation with full-CDI θ by language") +
   theme_classic(base_size = 13) +
   theme(legend.position = "top")
 ```
@@ -406,8 +429,8 @@ d_bakeoff |>
   scale_color_manual(values = c("English" = "#4575b4", "Spanish" = "#d73027"),
                      guide = "none") +
   labs(x = expression("Full-CDI" ~ theta ~ "(MAP)"),
-       y = "Measure score",
-       title = "Full-CDI θ vs. each reduced-form measure") +
+       y = expression("Form" ~ theta ~ "(MAP, form items only)"),
+       title = "Full-CDI θ vs. IRT θ from each reduced form") +
   theme_classic(base_size = 12) +
   theme(strip.background = element_blank())
 ```
