@@ -15,7 +15,7 @@ require(mirtCAT)
 require(ggpubr)
 ```
 
-When deciding how to assess bilingual children, researcher now have several options, including:
+When deciding how to assess bilingual children, researchers now have several options, including:
  - full CDI in each language
  - Swadesh-CDI in each language
  - CDI-CATs (for available languages)
@@ -23,153 +23,391 @@ When deciding how to assess bilingual children, researcher now have several opti
  - DLL-ES (only for English and Spanish)
 
 The question is: what is the best option (or combination), if the goal is to assess children's ability in each language?
-We'll start just by looking at a correlation matrix comparing each measure's estimated ability. 
+We compare each measure's correlation with full-CDI IRT theta, separately for English and Spanish.
 
 ```{r load-data}
-# BiLexPo data -- has 'bilingual' identifier in dataset_origin_name
+# BiLexPo data -- words only, two bilingual datasets
+# definition = WS_<item_id>, which matches the naming used in the IRT models.
+# item_id is a per-language index (EN item 1 ≠ SP item 1), so we build
+# separate EN and SP matrices rather than a single wide matrix.
 bi_dat <- readRDS("data/bilingual_item_data_clean.Rds") |>
-  mutate(definition = paste0("WS_",item_id)) |>
-  filter(dataset_origin_name %in% 
+  filter(item_kind == "word") |>
+  mutate(definition = paste0("WS_", item_id)) |>
+  filter(dataset_origin_name %in%
            c("Marchman Dallas Bilingual", "Hoff_English_Mexican_Bilingual")) |>
-  filter(production!=0, production!=680) # no floor or ceiling
+  filter(production != 0, production != 680)  # remove floor and ceiling
 
-items <- bi_dat |> distinct(language, item_id, uni_lemma, english_gloss, definition, item_definition) 
-en_items <- items |> filter(language=="English (American)") 
-sp_items <- items |> filter(language=="Spanish (Mexican)")
+items    <- bi_dat |>
+  distinct(language, item_id, uni_lemma, english_gloss, definition, item_definition)
+en_items <- items |> filter(language == "English (American)")
+sp_items <- items |> filter(language == "Spanish (Mexican)")
 
-d_demo <- bi_dat |> select(language, data_id, child_id, dataset_origin_name, form, age, sex, produces) |>
+# One row per (language × administration); production = total words produced
+d_demo <- bi_dat |>
+  select(language, data_id, child_id, dataset_origin_name, form, age, sex, produces) |>
   group_by(language, data_id, child_id, dataset_origin_name, form, age, sex) |>
-  summarise(production = sum(produces, na.rm=T)) |>
+  summarise(production = sum(produces, na.rm = TRUE), .groups = "drop") |>
   arrange(data_id)
 
-en_idx <- which(d_demo$language=="English (American)")
-sp_idx <- which(d_demo$language=="Spanish (Mexican)")
+en_idx <- which(d_demo$language == "English (American)")
+sp_idx <- which(d_demo$language == "Spanish (Mexican)")
 
-# can't index by uni_lemma -- lots of duplicates
-d_mat <- bi_dat |> pivot_wider(id_cols = data_id, names_from = definition, values_from = produces) |>
+d_demo_en <- d_demo[en_idx, ]
+d_demo_sp <- d_demo[sp_idx, ]
+
+# Separate wide matrices per language (WS_<item_id> columns; rows match d_demo_en/sp)
+d_mat_en <- bi_dat |>
+  filter(language == "English (American)") |>
+  pivot_wider(id_cols = data_id, names_from = definition, values_from = produces) |>
   arrange(data_id)
 
-# per-language data -- but how do we identify the bilinguals?
-#load("data/new_EN_WS_WG_norms.Rdata") # d_demo, d_mat, d_wide
-#load("data/wordbank_sp_ws_wg_webcdi12-30mos.Rds") # d_demo, d_mat, d_wide, items
+d_mat_sp <- bi_dat |>
+  filter(language == "Spanish (Mexican)") |>
+  pivot_wider(id_cols = data_id, names_from = definition, values_from = produces) |>
+  arrange(data_id)
 ```
 
-Using data from `r length(en_idx)` English WS administrations and `r length(sp_idx)` Spanish WS administrations.
+Using data from `r nrow(d_demo_en)` English WS administrations and `r nrow(d_demo_sp)` Spanish WS administrations.
+
+```{r build-matrices}
+# Raw item-response matrices for each language (WS_<item_id> columns, no data_id).
+# Column names already match en/sp$coefs$definition, so no renaming needed.
+en_dmat <- d_mat_en |> select(all_of(en_items$definition)) |> as.matrix()
+sp_dmat <- d_mat_sp |> select(all_of(sp_items$definition)) |> as.matrix()
+
+# Guard: WG administrations may use a three-level coding (0 = neither,
+# 1 = understands, 2 = produces).  Collapse to strict 0/1 so fscores() and
+# mirtCAT() don't reject any values outside [0, 1].
+binarize <- function(m) { m[!is.na(m)] <- as.numeric(m[!is.na(m)] > 0); m }
+en_dmat <- binarize(en_dmat)
+sp_dmat <- binarize(sp_dmat)
+
+# fscores() and mirtCAT() need a column for every item in the model.
+# Items absent from the bilingual form get NA (= not administered).
+# model_items: en$coefs$definition or sp$coefs$definition (WS_<item_id> strings)
+expand_to_model <- function(dmat, model_items) {
+  dmat_full <- matrix(NA_real_, nrow = nrow(dmat),
+                      ncol = length(model_items),
+                      dimnames = list(NULL, model_items))
+  shared <- intersect(colnames(dmat), model_items)
+  if (length(shared) > 0)
+    dmat_full[, shared] <- dmat[, shared, drop = FALSE]
+  dmat_full
+}
+```
 
 ```{r load-irt-models}
-# en$model and sp$model have the 2PL mirt models
+# en$model / sp$model: fitted 2PL mirt objects
+# en$coefs / sp$coefs: tibble[n_items × 5] with columns definition | a1 | d | g | u
+#   where definition = WS_<item_id> matching the columns in d_mat_en / d_mat_sp
 en <- readRDS("models/English (American)_2PL_allforms_prod_fits.rds")
 sp <- readRDS("models/Spanish (Mexican)_2PL_allforms_prod_fits.rds")
 
-#load("models/eng_ws_wg_mod_2pl_nobad.Rds") # mod_2pl
-#en_mod <- mod_2pl
-#load("models/sp_ws_wg_mod_2pl_nobad.Rds")
-#sp_mod <- mod_2pl
+en_model_items <- en$coefs$definition   # WS_1 … WS_682
+sp_model_items <- sp$coefs$definition   # WS_1 … WS_742
 
-# age-based starting items
-en_start_items <- read_csv("models/EN_production_start_items_by_age.csv") |>
-  rename(item_definition = definition) |> 
-  left_join(items |> select(item_definition, definition, item_id))
-sp_start_items <- read_csv("models/SP_production_start_items_by_age.csv") |>
+# Verify bilingual items are found in the respective model
+cat(sprintf("EN: %d / %d bilingual items matched to model  (%d model items total)\n",
+            sum(en_items$definition %in% en_model_items),
+            nrow(en_items), length(en_model_items)))
+cat(sprintf("SP: %d / %d bilingual items matched to model  (%d model items total)\n",
+            sum(sp_items$definition %in% sp_model_items),
+            nrow(sp_items), length(sp_model_items)))
+
+# Expand to full model item set
+en_dmat_full <- expand_to_model(en_dmat, en_model_items)
+sp_dmat_full <- expand_to_model(sp_dmat, sp_model_items)
+
+# ── Full CDI theta (gold standard) ──────────────────────────────────────────
+en_theta <- fscores(en$model, response.pattern = en_dmat_full, method = "MAP")
+sp_theta <- fscores(sp$model, response.pattern = sp_dmat_full, method = "MAP")
+
+d_demo_en$fullCDItheta <- en_theta[, "G"] # G not F1?
+d_demo_sp$fullCDItheta <- sp_theta[, "G"]
+
+# ── CAT simulation ───────────────────────────────────────────────────────────
+# Age-based start items.  The CSV was built for a different model, so the
+# stored `index` values are stale.  We recover the correct index by:
+#   1. joining on item_definition to get the WS_<id> definition string
+#   2. calling match() to find its 1-based position in the *current* model's
+#      item ordering (en/sp_model_items = en/sp$coefs$definition).
+# Items whose word isn't in the bilingual subset get NA → get_start_items()
+# falls back to "MI" (maximum-information first item) for those ages.
+en_start_items <- read_csv("models/EN_production_start_items_by_age.csv",
+                           show_col_types = FALSE) |>
   rename(item_definition = definition) |>
-  left_join(items |> select(item_definition, definition, item_id))
+  left_join(en_items |> select(item_definition, definition, uni_lemma),
+            by = "item_definition") |>
+  mutate(index = match(definition, en_model_items))
 
-# ToDo: re-define index column to match definition index in d_mat
+sp_start_items <- read_csv("models/SP_production_start_items_by_age.csv",
+                           show_col_types = FALSE) |>
+  rename(item_definition = definition) |>
+  left_join(sp_items |> select(item_definition, definition, uni_lemma),
+            by = "item_definition") |>
+  mutate(index = match(definition, sp_model_items))
 
-preferredCAT <- function(dat, method='ML', min_SEM=.15, start_item=c()) {
-  all_items = c() # track freq of all the items that were asked 
-  parms = c()
-  if(length(start_item)==0) start_item = 'MI' # otherwise supply age-based
-  results <- mirtCAT(mo = mod_2pl, criteria = 'MI', start_item = start_item, 
-                     method = method, local_pattern = dat, 
-                     design = list(min_items = 25,
-                                   max_items = 50, 
-                                   min_SEM = min_SEM))
-  for(s in 1:nrow(dat)) {
-    all_items = c(all_items, results[[s]]$items_answered)
-    so <- summary(results[[s]])
-    parms = rbind(parms, c(t(so$final_estimates), length(so$items_answered)))
+# ── IRT-based imputation of missing items ───────────────────────────────────
+# mirtCAT reads a "true" response from local_pattern for every item it selects.
+# Items absent from the bilingual form are NA → mirtCAT errors.  We fill those
+# NAs with the rounded P(X=1 | θ_i) from the 2PL model so the CAT has a valid
+# response for any item it might choose.
+# coefs tibble must have columns: definition, a1, d, g, u
+impute_2pl <- function(dmat_full, coefs, theta_vec) {
+  dmat_imp <- dmat_full
+  na_cols  <- which(apply(dmat_full, 2, anyNA))
+  if (length(na_cols) == 0) return(dmat_imp)
+
+  for (j in na_cols) {
+    p <- coefs[coefs$definition == colnames(dmat_full)[j], ]
+    if (nrow(p) == 0) next
+    na_rows <- which(is.na(dmat_full[, j]))
+    prob <- p$g[1] + (p$u[1] - p$g[1]) /
+              (1 + exp(-(p$a1[1] * theta_vec[na_rows] + p$d[1])))
+    dmat_imp[na_rows, j] <- round(prob)
   }
-  sum_score = rowSums(dat)
-  parms = data.frame(cbind(parms, sum_score))
-  names(parms) = c("thetaCAT","CAT_SE","Qs_asked","sum_score")
-  want = list(all_items=all_items, parms=parms)
-  return(want)
+  dmat_imp
 }
 
-start_item_subj = rep(NA, nrow(d_demo))
-for(i in 1:nrow(d_demo)) {
-  start_item_subj[i] = subset(age_startits, age==d_demo[i,]$age)$index
+en_dmat_full_imp <- impute_2pl(en_dmat_full, en$coefs, d_demo_en$fullCDItheta)
+sp_dmat_full_imp <- impute_2pl(sp_dmat_full, sp$coefs, d_demo_sp$fullCDItheta)
+
+cat(sprintf("EN NAs remaining after imputation: %d\n", sum(is.na(en_dmat_full_imp))))
+cat(sprintf("SP NAs remaining after imputation: %d\n", sum(is.na(sp_dmat_full_imp))))
+
+# ── CAT simulation ───────────────────────────────────────────────────────────
+# Simulate adaptive testing using each child's actual + imputed responses as
+# ground truth.  Stops when SEM < min_SEM (or after min_items–max_items items).
+preferredCAT <- function(mod, dat, method = "MAP", min_SEM = .15,
+                         start_item = c()) {
+  if (length(start_item) == 0) start_item <- "MI"
+  results <- mirtCAT(mo = mod, criteria = "MI", start_item = start_item,
+                     method = method, local_pattern = dat,
+                     design = list(min_items = 25, max_items = 50,
+                                   min_SEM = min_SEM))
+  parms <- do.call(rbind, lapply(seq_along(results), function(s) {
+    so <- summary(results[[s]])
+    c(t(so$final_estimates), length(so$items_answered))
+  }))
+  parms <- as.data.frame(parms)
+  names(parms) <- c("thetaCAT", "CAT_SE", "Qs_asked")
+  parms
 }
 
-cat_result = preferredCAT(d_mat_imp, method='MAP', start_item=start_item_subj)
+# Map each subject's age to the recommended start item index in the model
+get_start_items <- function(ages, start_df) {
+  sapply(ages, function(a) {
+    idx <- start_df |> filter(age == a) |> slice(1) |> pull(index)
+    if (length(idx) == 0 || is.na(idx)) "MI" else idx
+  })
+}
 
-d_demo$fullCDItheta = fscores_2pl$ability
-d_demo$CATtheta = cat_result$parms$thetaCAT
-d_demo$CAT_SE = cat_result$parms$CAT_SE
-d_demo$Qs_asked = cat_result$parms$Qs_asked
+en_start_subj <- get_start_items(d_demo_en$age, en_start_items)
+sp_start_subj <- get_start_items(d_demo_sp$age, sp_start_items)
+
+
+# Also inspect the start_item vector
+cat("en_start_subj unique values:", sort(unique(en_start_subj)), "\n")
+cat("  (any 'MI'?", any(en_start_subj == "MI"), ")\n")
+
+en_cat <- preferredCAT(en$model, en_dmat_full_imp, start_item = en_start_subj)
+sp_cat <- preferredCAT(sp$model, sp_dmat_full_imp, start_item = sp_start_subj)
+
+d_demo_en$CATtheta <- en_cat$thetaCAT
+d_demo_en$CAT_SE   <- en_cat$CAT_SE
+d_demo_en$Qs_asked <- en_cat$Qs_asked
+
+d_demo_sp$CATtheta <- sp_cat$thetaCAT
+d_demo_sp$CAT_SE   <- sp_cat$CAT_SE
+d_demo_sp$Qs_asked <- sp_cat$Qs_asked
+
+cat(sprintf("Median CAT items asked — EN: %.0f  SP: %.0f\n",
+            median(en_cat$Qs_asked), median(sp_cat$Qs_asked)))
 ```
 
 ```{r load-forms}
-swad100 <- read_csv("forms/Swadesh100.csv")
+swad100 <- read_csv("forms/Swadesh100.csv", show_col_types = FALSE)
 
 swad_extension_unis <- c(
   "try", "under", "in", "out",
-  "glue (object)", "toy (object)", # chalk only on 14 forms, try on 13
+  "glue (object)", "toy (object)",
   "all", "many", "not", "a lot"
 )
-
 swad110 <- tibble(uni_lemma = c(swad100$uni_lemma, swad_extension_unis))
-# need to get Spanish and English item_ids for each swad110 uni-lemma
 
-floccia30 <- c("elephant", "fish (animal)", "lion", "airplane", "car", "ball", "book", "milk", "nose",
-               "shoe", "sock", "bed", "chair", "door", "table", "cup", "scissors", "soap", "flower",
-               "sky", "tree", "mommy", "fall (action)", "play", "big", "cold", "dirty", "hot",
-               "what", "where (question)")
-# need to get Spanih and English item_ids for each floccia30 uni-lemma
+# Floccia et al. (2020) 30-item cross-linguistic short form (English glosses)
+floccia30_en <- c("elephant", "fish (animal)", "lion", "airplane", "car", "ball",
+                  "book", "milk", "nose", "shoe", "sock", "bed", "chair", "door",
+                  "table", "cup", "scissors", "soap", "flower", "sky", "tree",
+                  "mommy", "fall (action)", "play", "big", "cold", "dirty", "hot",
+                  "what", "where (question)")
 
-# could also look at eng-ws-shortA, eng-ws-shortB, and spanish-ws-short..but let's do it later
-en_shortA <- read_csv("forms/eng-ws-shortA.csv")
-en_shortB <- read_csv("forms/eng-ws-shortB.csv")
-sp_short <- read_csv("forms/spanish-ws-short.csv")
+en_shortA <- read_csv("forms/eng-ws-shortA.csv", show_col_types = FALSE)
+en_shortB <- read_csv("forms/eng-ws-shortB.csv", show_col_types = FALSE)
+sp_short  <- read_csv("forms/spanish-ws-short.csv", show_col_types = FALSE)
 
-#en_dll_short <- read_csv("forms/DLL/new_DLL-ES2-short-English.csv") # 79 items
-#sp_dll_short <- read_csv("forms/DLL/new_DLL-ES2-short-Spanish.csv") # 75
-dll2long_raw <- read_csv("forms/DLL/new_DLL-ES2-long.csv")
-dll2long <- dll2long_raw %>% mutate(english = tolower(english)) %>%
-  mutate(english = case_when(english == 'daddy (or name/word used in your family)' ~ 'daddy*',
-                          english == 'teddy bear' ~ 'teddybear',
-                          english == 'patty cake' ~ 'pattycake', # or swing (action) ?
-                          english == 'dress' ~ 'dress (object)',
-                          english == 'i' ~ 'I',
-                          english == 'penis (or word used in your family)' ~ 'penis*',
-                          english == 'water' ~ 'water (beverage)',
-                          english == 'orange' ~ 'orange (food)',
-                          english == 'clock/watch' ~ 'clock', # or watch (object)
-                          english == 'drink' ~ 'drink (action)',
-                          english == 'feet' ~ 'foot',
-                          english == 'picture (\"or photo\")' ~ 'picture',
-                          english == 'buttocks/bottom (or word used in your family)' ~ 'buttocks/bottom*',
-                          TRUE ~ english))
-
-dll2long <- dll2long %>% mutate(spanish = tolower(spanish)) %>%
-  separate(col = spanish, into = c("spanish", NA), sep=" \\(") %>%
-  mutate(spanish = case_when(spanish == 'pipi' ~ 'pipí',
-                          spanish == 'shh' ~ 'shhh',
-                          spanish == 'bolsa' ~ 'bolsa (clothing)', # or bolsa (household) ?
-                          spanish == 'qué' ~ 'qué (question_words)',
-                          TRUE ~ spanish))
-
-#length(intersect(dll2long$spanish, coefs$sp$definition)) 
-#setdiff(dll2long$spanish, coefs$sp$definition)
-
-en_wg_dll_long_cols = union(en_wg_short_dll_cols, na.omit(match(dll1long$english, colnames(d_mat_en)))) # 234
-
-d_demo_en$DLL1long_sum = rowSums(d_mat_en[,en_wg_dll_long_cols], na.rm=T)
+dll2long_raw <- read_csv("forms/DLL/new_DLL-ES2-long.csv", show_col_types = FALSE) |> 
+  select(-`...1`)
+dll2long <- dll2long_raw |>
+  mutate(english = tolower(english)) |>
+  mutate(english = case_when(
+    english == "daddy (or name/word used in your family)" ~ "daddy*",
+    english == "teddy bear"                              ~ "teddybear",
+    english == "patty cake"                              ~ "pattycake",
+    english == "dress"                                   ~ "dress (object)",
+    english == "i"                                       ~ "I",
+    english == "penis (or word used in your family)"     ~ "penis*",
+    english == "water"                                   ~ "water (beverage)",
+    english == "orange"                                  ~ "orange (food)",
+    english == "clock/watch"                             ~ "clock",
+    english == "drink"                                   ~ "drink (action)",
+    english == "feet"                                    ~ "foot",
+    english == 'picture ("or photo")'                   ~ "picture",
+    english == "buttocks/bottom (or word used in your family)" ~
+      "buttocks/bottom*",
+    TRUE ~ english
+  )) |>
+  mutate(spanish = tolower(spanish)) |>
+  separate(col = spanish, into = c("spanish", NA), sep = " \\(") |>
+  mutate(spanish = case_when(
+    spanish == "pipi"  ~ "pipí",
+    spanish == "shh"   ~ "shhh",
+    spanish == "bolsa" ~ "bolsa (clothing)",
+    spanish == "qué"   ~ "qué (question_words)",
+    TRUE ~ spanish
+  ))
 ```
 
+```{r score-forms}
+# ── Helpers: map human-readable form word lists → WS_<id> column names ──────
+# Look up item_definition (or uni_lemma) in en_items / sp_items to get the
+# WS_<id> definition strings present as columns in d_mat_en / d_mat_sp.
+match_en <- function(words) {
+  en_items |> filter(item_definition %in% words) |>
+    pull(definition) |> intersect(colnames(d_mat_en))
+}
+match_sp <- function(words) {
+  sp_items |> filter(item_definition %in% words) |>
+    pull(definition) |> intersect(colnames(d_mat_sp))
+}
+match_uni_en <- function(unis) {
+  en_items |> filter(uni_lemma %in% unis) |>
+    pull(definition) |> intersect(colnames(d_mat_en))
+}
+match_uni_sp <- function(unis) {
+  sp_items |> filter(uni_lemma %in% unis) |>
+    pull(definition) |> intersect(colnames(d_mat_sp))
+}
 
-```{r}
+# ── Locate item columns for each form ───────────────────────────────────────
+shortA_en_cols  <- match_en(en_shortA$word)
+short_sp_cols   <- match_sp(sp_short$word)
 
+swad100_en_cols <- match_uni_en(swad100$uni_lemma)
+swad100_sp_cols <- match_uni_sp(swad100$uni_lemma)
+
+dll2_en_cols    <- match_en(dll2long$english)
+dll2_sp_cols    <- match_sp(dll2long$spanish)
+
+# Floccia: English glosses → shared uni_lemmas → SP definitions
+floccia_unis    <- en_items |> filter(item_definition %in% floccia30_en) |> pull(uni_lemma)
+floccia_en_cols <- match_uni_en(floccia_unis)
+floccia_sp_cols <- match_uni_sp(floccia_unis)
+
+# ── Item coverage table ──────────────────────────────────────────────────────
+tibble(
+  Form          = c("EN shortA", "SP short",
+                    "Swadesh-100 EN", "Swadesh-100 SP",
+                    "DLL-ES2 EN", "DLL-ES2 SP",
+                    "Floccia-30 EN", "Floccia-30 SP"),
+  Items_matched = c(length(shortA_en_cols),  length(short_sp_cols),
+                    length(swad100_en_cols),  length(swad100_sp_cols),
+                    length(dll2_en_cols),     length(dll2_sp_cols),
+                    length(floccia_en_cols),  length(floccia_sp_cols)),
+  Form_total    = c(nrow(en_shortA), nrow(sp_short),
+                    100, 100,
+                    nrow(dll2long), nrow(dll2long),
+                    length(floccia30_en), length(floccia30_en))
+) |>
+  mutate(Pct_matched = round(100 * Items_matched / Form_total)) |>
+  kable(caption = "Item coverage: bilingual data vs. each form") |>
+  kable_classic(full_width = FALSE)
+
+# ── Compute sum scores (directly into the per-language demo frames) ──────────
+d_demo_en$shortForm_sum <- rowSums(d_mat_en[, shortA_en_cols,  drop = FALSE], na.rm = TRUE)
+d_demo_en$swad100_sum   <- rowSums(d_mat_en[, swad100_en_cols, drop = FALSE], na.rm = TRUE)
+d_demo_en$dll2_sum      <- rowSums(d_mat_en[, dll2_en_cols,    drop = FALSE], na.rm = TRUE)
+d_demo_en$floccia_sum   <- rowSums(d_mat_en[, floccia_en_cols, drop = FALSE], na.rm = TRUE)
+
+d_demo_sp$shortForm_sum <- rowSums(d_mat_sp[, short_sp_cols,   drop = FALSE], na.rm = TRUE)
+d_demo_sp$swad100_sum   <- rowSums(d_mat_sp[, swad100_sp_cols, drop = FALSE], na.rm = TRUE)
+d_demo_sp$dll2_sum      <- rowSums(d_mat_sp[, dll2_sp_cols,    drop = FALSE], na.rm = TRUE)
+d_demo_sp$floccia_sum   <- rowSums(d_mat_sp[, floccia_sp_cols, drop = FALSE], na.rm = TRUE)
 ```
 
+## Bakeoff: correlation with full-CDI θ
+
+For each measure we compute Pearson *r* with the full-CDI MAP theta estimate,
+separately for English and Spanish.
+The CDI-CAT is the IRT-based adaptive alternative; all others are sum scores.
+
+```{r bakeoff, fig.width = 9, fig.height = 5}
+measures       <- c("shortForm_sum", "swad100_sum", "dll2_sum", "floccia_sum", "CATtheta")
+measure_labels <- c("Published\nShort Form", "Swadesh-100",
+                    "DLL-ES2", "Floccia-30", "CDI-CAT")
+
+# Combine for plotting, then compute correlations within each language
+d_bakeoff <- bind_rows(
+  d_demo_en |> mutate(lang = "English"),
+  d_demo_sp |> mutate(lang = "Spanish")
+)
+
+cor_table <- d_bakeoff |>
+  group_by(lang) |>
+  summarise(across(all_of(measures),
+                   ~ cor(.x, fullCDItheta, use = "complete.obs")),
+            .groups = "drop") |>
+  pivot_longer(all_of(measures), names_to = "measure", values_to = "r") |>
+  mutate(measure = factor(measure, levels = measures, labels = measure_labels))
+
+# ── Summary table ─────────────────────────────────────────────────────────────
+cor_table |>
+  pivot_wider(names_from = lang, values_from = r) |>
+  rename(Measure = measure) |>
+  kable(digits = 3,
+        caption = "Correlation with full-CDI θ (MAP) by language") |>
+  kable_classic(full_width = FALSE)
+
+# ── Bar chart ─────────────────────────────────────────────────────────────────
+cor_table |>
+  ggplot(aes(x = measure, y = r, fill = lang)) +
+  geom_col(position = position_dodge(.7), width = .6) +
+  geom_text(aes(label = sprintf("%.3f", r)),
+            position = position_dodge(.7), vjust = -0.4, size = 3.2) +
+  scale_fill_manual(values = c("English" = "#4575b4", "Spanish" = "#d73027")) +
+  coord_cartesian(ylim = c(0.85, 1.0)) +
+  labs(x = NULL,
+       y = expression(italic(r) ~ "with full-CDI" ~ theta),
+       fill = NULL,
+       title = "CDI bakeoff: correlation with full-CDI θ by language") +
+  theme_classic(base_size = 13) +
+  theme(legend.position = "top")
+```
+
+```{r bakeoff-scatter, fig.width = 10, fig.height = 8}
+# Scatter plots: full-CDI theta vs. each measure, faceted by language
+d_bakeoff |>
+  pivot_longer(all_of(measures), names_to = "measure", values_to = "score") |>
+  mutate(measure = factor(measure, levels = measures, labels = measure_labels)) |>
+  ggplot(aes(x = fullCDItheta, y = score, color = lang)) +
+  geom_point(alpha = .25, size = .8) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = .8) +
+  facet_grid(lang ~ measure, scales = "free_y") +
+  scale_color_manual(values = c("English" = "#4575b4", "Spanish" = "#d73027"),
+                     guide = "none") +
+  labs(x = expression("Full-CDI" ~ theta ~ "(MAP)"),
+       y = "Measure score",
+       title = "Full-CDI θ vs. each reduced-form measure") +
+  theme_classic(base_size = 12) +
+  theme(strip.background = element_blank())
+```
