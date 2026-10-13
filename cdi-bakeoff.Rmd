@@ -12,7 +12,6 @@ require(tidyverse)
 require(kableExtra)
 require(mirt)
 require(mirtCAT)
-require(ggpubr)
 ```
 
 When deciding how to assess bilingual children, researchers now have several options, including:
@@ -27,7 +26,7 @@ We compare each measure's correlation with full-CDI IRT theta, separately for En
 
 ```{r load-data}
 # BiLexPo data -- words only, two bilingual datasets
-# definition = WS_<item_id>, which matches the naming used in the IRT models.
+# definition = WS_<item_id> (e.g. WS_item_1), matching the naming in the IRT models.
 # item_id is a per-language index (EN item 1 ≠ SP item 1), so we build
 # separate EN and SP matrices rather than a single wide matrix.
 bi_dat <- readRDS("data/bilingual_item_data_clean.Rds") |>
@@ -75,9 +74,7 @@ Using data from `r nrow(d_demo_en)` English WS administrations and `r nrow(d_dem
 en_dmat <- d_mat_en |> select(all_of(en_items$definition)) |> as.matrix()
 sp_dmat <- d_mat_sp |> select(all_of(sp_items$definition)) |> as.matrix()
 
-# Guard: WG administrations may use a three-level coding (0 = neither,
-# 1 = understands, 2 = produces).  Collapse to strict 0/1 so fscores() and
-# mirtCAT() don't reject any values outside [0, 1].
+# `produces` is logical; convert to numeric 0/1 for fscores() and mirtCAT()
 binarize <- function(m) { m[!is.na(m)] <- as.numeric(m[!is.na(m)] > 0); m }
 en_dmat <- binarize(en_dmat)
 sp_dmat <- binarize(sp_dmat)
@@ -103,8 +100,9 @@ expand_to_model <- function(dmat, model_items) {
 en <- readRDS("models/English (American)_2PL_allforms_prod_fits.rds")
 sp <- readRDS("models/Spanish (Mexican)_2PL_allforms_prod_fits.rds")
 
-en_model_items <- en$coefs$definition   # WS_1 … WS_682
-sp_model_items <- sp$coefs$definition   # WS_1 … WS_742
+# WS_item_n for WS items, WG_item_n for WG-only items (682 EN, 742 SP)
+en_model_items <- en$coefs$definition
+sp_model_items <- sp$coefs$definition
 
 # Verify bilingual items are found in the respective model
 cat(sprintf("EN: %d / %d bilingual items matched to model  (%d model items total)\n",
@@ -122,10 +120,10 @@ sp_dmat_full <- expand_to_model(sp_dmat, sp_model_items)
 en_theta <- fscores(en$model, response.pattern = en_dmat_full, method = "MAP")
 sp_theta <- fscores(sp$model, response.pattern = sp_dmat_full, method = "MAP")
 
-d_demo_en$fullCDItheta <- en_theta[, "G"] # G not F1?
+d_demo_en$fullCDItheta <- en_theta[, "G"]
 d_demo_sp$fullCDItheta <- sp_theta[, "G"]
 
-# ── CAT simulation ───────────────────────────────────────────────────────────
+# ── CAT start items ──────────────────────────────────────────────────────────
 # Age-based start items.  The CSV was built for a different model, so the
 # stored `index` values are stale.  We recover the correct index by:
 #   1. joining on item_definition to get the WS_<id> definition string
@@ -148,10 +146,11 @@ sp_start_items <- read_csv("models/SP_production_start_items_by_age.csv",
   mutate(index = match(definition, sp_model_items))
 
 # ── IRT-based imputation of missing items ───────────────────────────────────
-# mirtCAT reads a "true" response from local_pattern for every item it selects.
-# Items absent from the bilingual form are NA → mirtCAT errors.  We fill those
-# NAs with the rounded P(X=1 | θ_i) from the 2PL model so the CAT has a valid
-# response for any item it might choose.
+# mirtCAT requires a complete local_pattern (no NAs).  We fill NAs with the
+# rounded P(X=1 | θ_i) from the 2PL model.  Items never observed in the
+# bilingual data (WG-only items) are excluded from the CAT below, since their
+# imputed "responses" would come straight from the full-CDI θ criterion; this
+# imputation then only covers the handful of scattered missing responses.
 # coefs tibble must have columns: definition, a1, d, g, u
 impute_2pl <- function(dmat_full, coefs, theta_vec) {
   dmat_imp <- dmat_full
@@ -176,15 +175,16 @@ cat(sprintf("EN NAs remaining after imputation: %d\n", sum(is.na(en_dmat_full_im
 cat(sprintf("SP NAs remaining after imputation: %d\n", sum(is.na(sp_dmat_full_imp))))
 
 # ── CAT simulation ───────────────────────────────────────────────────────────
-# Simulate adaptive testing using each child's actual + imputed responses as
-# ground truth.  Stops when SEM < min_SEM (or after min_items–max_items items).
+# Simulate adaptive testing using each child's observed responses as ground
+# truth.  Stops when SEM < min_SEM (or after min_items–max_items items).
+# excluded: model item indices the CAT may never select.
 preferredCAT <- function(mod, dat, method = "MAP", min_SEM = .15,
-                         start_item = c()) {
+                         start_item = c(), excluded = integer(0)) {
   if (length(start_item) == 0) start_item <- "MI"
+  design <- list(min_items = 25, max_items = 50, min_SEM = min_SEM)
+  if (length(excluded) > 0) design$constraints <- list(excluded = excluded)
   results <- mirtCAT(mo = mod, criteria = "MI", start_item = start_item,
-                     method = method, local_pattern = dat,
-                     design = list(min_items = 25, max_items = 50,
-                                   min_SEM = min_SEM))
+                     method = method, local_pattern = dat, design = design)
   parms <- do.call(rbind, lapply(seq_along(results), function(s) {
     so <- summary(results[[s]])
     c(t(so$final_estimates), length(so$items_answered))
@@ -205,13 +205,14 @@ get_start_items <- function(ages, start_df) {
 en_start_subj <- get_start_items(d_demo_en$age, en_start_items)
 sp_start_subj <- get_start_items(d_demo_sp$age, sp_start_items)
 
+# Model items with no observed responses (2 EN, 62 SP WG-only items)
+en_unobserved <- which(colSums(!is.na(en_dmat_full)) == 0)
+sp_unobserved <- which(colSums(!is.na(sp_dmat_full)) == 0)
 
-# Also inspect the start_item vector
-cat("en_start_subj unique values:", sort(unique(en_start_subj)), "\n")
-cat("  (any 'MI'?", any(en_start_subj == "MI"), ")\n")
-
-en_cat <- preferredCAT(en$model, en_dmat_full_imp, start_item = en_start_subj)
-sp_cat <- preferredCAT(sp$model, sp_dmat_full_imp, start_item = sp_start_subj)
+en_cat <- preferredCAT(en$model, en_dmat_full_imp, start_item = en_start_subj,
+                       excluded = en_unobserved)
+sp_cat <- preferredCAT(sp$model, sp_dmat_full_imp, start_item = sp_start_subj,
+                       excluded = sp_unobserved)
 
 d_demo_en$CATtheta <- en_cat$thetaCAT
 d_demo_en$CAT_SE   <- en_cat$CAT_SE
@@ -239,8 +240,8 @@ swad110 <- tibble(uni_lemma = c(swad100$uni_lemma, swad_extension_unis))
 floccia30_en <- c("elephant", "fish (animal)", "lion", "airplane", "car", "ball",
                   "book", "milk", "nose", "shoe", "sock", "bed", "chair", "door",
                   "table", "cup", "scissors", "soap", "flower", "sky", "tree",
-                  "mommy", "fall (action)", "play", "big", "cold", "dirty", "hot",
-                  "what", "where (question)")
+                  "mommy*", "fall", "play", "big", "cold", "dirty", "hot",
+                  "what", "where")
 
 en_shortA <- read_csv("forms/eng-ws-shortA.csv", show_col_types = FALSE)
 en_shortB <- read_csv("forms/eng-ws-shortB.csv", show_col_types = FALSE)
@@ -268,7 +269,7 @@ dll2long <- dll2long_raw |>
     TRUE ~ english
   )) |>
   mutate(spanish = tolower(spanish)) |>
-  separate(col = spanish, into = c("spanish", NA), sep = " \\(") |>
+  separate(col = spanish, into = c("spanish", NA), sep = " \\(", fill = "right") |>
   mutate(spanish = case_when(
     spanish == "pipi"  ~ "pipí",
     spanish == "shh"   ~ "shhh",
@@ -368,53 +369,102 @@ d_demo_sp$floccia_theta   <- score_form_irt(sp_dmat, floccia_sp_cols, sp$model, 
 
 ## Bakeoff: correlation with full-CDI θ
 
-For each measure we compute Pearson *r* with the full-CDI MAP theta estimate,
-separately for English and Spanish.
+For each measure we compare its θ estimate to the full-CDI MAP θ,
+separately for English and Spanish, using Pearson *r*, RMSE, and bias
+(mean of measure θ − full-CDI θ).
 All short forms are scored as IRT MAP theta (using only the items on that form;
 the remaining model items are treated as not administered).
 The CDI-CAT is also IRT-scored via adaptive testing.
+95% CIs come from a cluster bootstrap that resamples children, since some
+children contribute up to three administrations.
+Note that each form's items are a subset of the full CDI, which inflates
+agreement somewhat, more so for longer forms.
 
 ```{r bakeoff, fig.width = 9, fig.height = 5}
 measures       <- c("shortForm_theta", "swad100_theta", "dll2_theta", "floccia_theta", "CATtheta")
 measure_labels <- c("Published\nShort Form", "Swadesh-100",
                     "DLL-ES2", "Floccia-30", "CDI-CAT")
 
-# Combine for plotting, then compute correlations within each language
 d_bakeoff <- bind_rows(
   d_demo_en |> mutate(lang = "English"),
   d_demo_sp |> mutate(lang = "Spanish")
 )
 
-cor_table <- d_bakeoff |>
-  group_by(lang) |>
-  summarise(across(all_of(measures),
-                   ~ cor(.x, fullCDItheta, use = "complete.obs")),
-            .groups = "drop") |>
-  pivot_longer(all_of(measures), names_to = "measure", values_to = "r") |>
-  mutate(measure = factor(measure, levels = measures, labels = measure_labels))
+# Items used by each measure (CAT: median number administered)
+n_items <- tibble(
+  lang    = rep(c("English", "Spanish"), each = length(measures)),
+  measure = rep(measures, 2),
+  n_items = c(length(shortA_en_cols), length(swad100_en_cols), length(dll2_en_cols),
+              length(floccia_en_cols), median(d_demo_en$Qs_asked),
+              length(short_sp_cols), length(swad100_sp_cols), length(dll2_sp_cols),
+              length(floccia_sp_cols), median(d_demo_sp$Qs_asked))
+)
+
+# Agreement of each measure with full-CDI θ
+agreement <- function(d) {
+  map_dfr(measures, function(m) {
+    err <- d[[m]] - d$fullCDItheta
+    tibble(measure = m,
+           r       = cor(d[[m]], d$fullCDItheta, use = "complete.obs"),
+           rmse    = sqrt(mean(err^2, na.rm = TRUE)),
+           bias    = mean(err, na.rm = TRUE))
+  })
+}
+
+# Cluster bootstrap: resample children, keeping all of each child's administrations
+boot_agreement <- function(d, n_boot = 1000) {
+  rows_by_child <- split(seq_len(nrow(d)), d$child_id)
+  map_dfr(seq_len(n_boot), function(b) {
+    idx <- unlist(sample(rows_by_child, replace = TRUE), use.names = FALSE)
+    agreement(d[idx, ])
+  }, .id = "boot")
+}
+
+set.seed(2026)
+agree_est  <- d_bakeoff |> group_by(lang) |> group_modify(~ agreement(.x)) |> ungroup()
+agree_boot <- d_bakeoff |> group_by(lang) |> group_modify(~ boot_agreement(.x)) |> ungroup()
+
+agree_ci <- agree_boot |>
+  group_by(lang, measure) |>
+  summarise(across(c(r, rmse, bias),
+                   list(lo = ~ quantile(.x, .025), hi = ~ quantile(.x, .975))),
+            .groups = "drop")
+
+agree_table <- agree_est |>
+  left_join(agree_ci, by = c("lang", "measure")) |>
+  left_join(n_items,  by = c("lang", "measure")) |>
+  mutate(measure = factor(measure, levels = measures, labels = measure_labels)) |>
+  arrange(lang, measure)
 
 # ── Summary table ─────────────────────────────────────────────────────────────
-cor_table |>
-  pivot_wider(names_from = lang, values_from = r) |>
-  rename(Measure = measure) |>
-  kable(digits = 3,
-        caption = "Correlation with full-CDI θ (MAP) by language") |>
-  kable_classic(full_width = FALSE)
+fmt_ci <- function(est, lo, hi, digits = 3)
+  sprintf(paste0("%.", digits, "f [%.", digits, "f, %.", digits, "f]"), est, lo, hi)
 
-# ── Bar chart ─────────────────────────────────────────────────────────────────
-cor_table |>
-  ggplot(aes(x = measure, y = r, fill = lang)) +
-  geom_col(position = position_dodge(.7), width = .6) +
-  geom_text(aes(label = sprintf("%.3f", r)),
-            position = position_dodge(.7), vjust = -0.4, size = 3.2) +
-  scale_fill_manual(values = c("English" = "#4575b4", "Spanish" = "#d73027")) +
-  coord_cartesian(ylim = c(0.9, 1.0)) +
-  labs(x = NULL,
-       y = expression(italic(r) ~ "with full-CDI" ~ theta),
-       fill = NULL,
-       title = "CDI bakeoff: IRT θ correlation with full-CDI θ by language") +
-  theme_classic(base_size = 13) +
-  theme(legend.position = "top")
+agree_table |>
+  transmute(Measure = gsub("\n", " ", measure),
+            Items   = n_items,
+            `r [95% CI]`    = fmt_ci(r, r_lo, r_hi),
+            `RMSE [95% CI]` = fmt_ci(rmse, rmse_lo, rmse_hi),
+            `Bias [95% CI]` = fmt_ci(bias, bias_lo, bias_hi)) |>
+  kable(caption = "Agreement with full-CDI θ (MAP) by language. CAT items = median administered.") |>
+  kable_classic(full_width = FALSE) |>
+  pack_rows(index = table(agree_table$lang))
+
+# ── r and RMSE with bootstrap CIs ─────────────────────────────────────────────
+agree_table |>
+  select(lang, measure, r_est = r, r_lo, r_hi, rmse_est = rmse, rmse_lo, rmse_hi) |>
+  pivot_longer(-c(lang, measure), names_to = c("metric", ".value"), names_sep = "_") |>
+  mutate(metric = factor(metric, levels = c("r", "rmse"),
+                         labels = c("Correlation with full-CDI θ",
+                                    "RMSE vs. full-CDI θ"))) |>
+  ggplot(aes(x = measure, y = est, ymin = lo, ymax = hi, color = lang)) +
+  geom_pointrange(position = position_dodge(.5), size = .3) +
+  facet_wrap(~ metric, scales = "free_y") +
+  scale_color_manual(values = c("English" = "#4575b4", "Spanish" = "#d73027")) +
+  labs(x = NULL, y = NULL, color = NULL,
+       title = "CDI bakeoff: agreement with full-CDI θ (95% cluster-bootstrap CIs)") +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "top", strip.background = element_blank())
 ```
 
 ```{r bakeoff-scatter, fig.width = 10, fig.height = 8}
